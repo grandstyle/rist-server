@@ -1,0 +1,51 @@
+{
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {
+          "name": "RIST.Receiver.Server",
+          "version": "1.0.0.0",
+          "type": "win32",
+          "processorArchitecture": "*"
+        },
+        "description": "Ultra-Lean RIST Receiver Server",
+        "minimum-os": "vista",
+        "execution-level": "asInvoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "common-controls-v6": true
+      }
+    }
+  },
+  "RT_GROUP_ICON": {
+    "APP": {
+      "0000": [
+        "../assets/app.png"
+      ]
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0409": {
+        "fixed": {
+          "file_version": "1.0.0.0",
+          "product_version": "1.0.0.0"
+        },
+        "info": {
+          "0409": {
+            "Comments": "Ultra-Lean RIST Receiver Server",
+            "CompanyName": "RIST Server",
+            "FileDescription": "RIST Receiver Server",
+            "FileVersion": "1.0.0.0",
+            "InternalName": "RIST-Server.exe",
+            "LegalCopyright": "Copyright 2026",
+            "OriginalFilename": "RIST-Server.exe",
+            "ProductName": "RIST Receiver Server",
+            "ProductVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  }
+}

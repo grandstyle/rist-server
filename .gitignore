@@ -1,0 +1,27 @@
+﻿# Binaries (werden als GitHub Release Assets hochgeladen)
+*.exe
+*.syso
+
+# Build-Artefakte
+/installer/RIST-Server.exe
+/installer/app.ico
+/installer/rsrc_windows_*.syso
+
+# Go build cache
+/vendor/
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs & Temp
+*.log
+*.tmp
+
+# Config (persönliche Einstellungen, nicht ins Repo)
+config.json
