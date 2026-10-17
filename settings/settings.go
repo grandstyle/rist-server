@@ -128,6 +128,18 @@ func ParseOutTarget(raw string, defaultPort int) (string, int, error) {
 	return raw, defaultPort, nil
 }
 
+// ParseRistPort parst Eingaben wie "1968", ":1968", "192.168.1.50:1968" und gibt den Port zurück.
+func ParseRistPort(raw string, defaultPort int) (int, error) {
+	_, port, err := ParseOutTarget(raw, defaultPort)
+	if err != nil {
+		return 0, err
+	}
+	if port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("Port muss zwischen 1 und 65535 liegen")
+	}
+	return port, nil
+}
+
 func SaveConfig(cfg Config) error {
 	path, err := getConfigPath()
 	if err != nil {

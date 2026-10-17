@@ -1,9 +1,12 @@
-﻿name: Release Builds
+name: Release Builds
 
 on:
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:

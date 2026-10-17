@@ -2,12 +2,8 @@ package ui
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"runtime"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -17,7 +13,6 @@ import (
 	"rist-server/engine"
 	"rist-server/settings"
 	"rist-server/telemetry"
-	"rist-server/version"
 )
 
 var (
@@ -32,6 +27,7 @@ var (
 	procCreateWindowExW        = user32.NewProc("CreateWindowExW")
 	procDefWindowProcW         = user32.NewProc("DefWindowProcW")
 	procShowWindow             = user32.NewProc("ShowWindow")
+	procMoveWindow             = user32.NewProc("MoveWindow")
 	procUpdateWindow           = user32.NewProc("UpdateWindow")
 	procGetMessageW            = user32.NewProc("GetMessageW")
 	procTranslateMessage       = user32.NewProc("TranslateMessage")
@@ -75,7 +71,11 @@ var (
 	procCallWindowProcW        = user32.NewProc("CallWindowProcW")
 	procGetDC                  = user32.NewProc("GetDC")
 	procReleaseDC              = user32.NewProc("ReleaseDC")
+	procCreateCaret            = user32.NewProc("CreateCaret")
+	procSetCaretPos            = user32.NewProc("SetCaretPos")
+	procShowCaret              = user32.NewProc("ShowCaret")
 	procHideCaret              = user32.NewProc("HideCaret")
+	procDestroyCaret           = user32.NewProc("DestroyCaret")
 
 	procCreateSolidBrush       = gdi32.NewProc("CreateSolidBrush")
 	procCreatePen              = gdi32.NewProc("CreatePen")
@@ -125,6 +125,7 @@ const (
 	WS_EX_CLIENTEDGE = 0x00000200
 	WS_EX_APPWINDOW  = 0x00040000
 
+	ES_LEFT   = 0x0000
 	ES_CENTER = 0x0001
 	ES_NUMBER = 0x2000
 
@@ -156,6 +157,8 @@ const (
 	WM_CLOSE          = 0x0010
 	WM_SETFOCUS       = 0x0007
 	WM_KILLFOCUS      = 0x0008
+	WM_KEYDOWN        = 0x0100
+	WM_CHAR           = 0x0102
 	WM_USER           = 0x0400
 
 	ICON_SMALL = 0
@@ -201,7 +204,12 @@ const (
 
 	CF_UNICODETEXT = 13
 	GMEM_MOVEABLE  = 0x0002
-
+	EM_GETSEL       = 0x00B0
+	EM_SETSEL       = 0x00B1
+	EM_SETMARGINS   = 0x00D3
+	EC_LEFTMARGIN   = 0x0001
+	EC_RIGHTMARGIN  = 0x0002
+	EM_SETREADONLY  = 0x00CF
 	EM_SETCUEBANNER = 0x1501 // Platzhalter-Text für Edit-Felder
 
 	GWLP_WNDPROC = -4 // SetWindowLongPtr: eigene WndProc einhängen
@@ -328,7 +336,6 @@ type NOTIFYICONDATAW struct {
 
 type UI struct {
 	hwnd              uintptr
-	hwndEditRist      uintptr
 	hwndEditOut       uintptr
 	hwndBtnBuf500     uintptr
 	hwndBtnBuf1000    uintptr
@@ -372,8 +379,7 @@ type UI struct {
 	config     settings.Config
 	httpServer *telemetry.HTTPServer
 
-	editRistOrigProc uintptr // Originale WndProc des RIST-Port Edit-Felds (für Subclassing)
-	editOutOrigProc  uintptr // Originale WndProc des Ziel-IP Edit-Felds (für Subclassing)
+	editOutOrigProc uintptr // Originale WndProc des Ziel-IP Edit-Felds (für Subclassing)
 
 	mu                 sync.Mutex
 	statusMsg          string
@@ -382,10 +388,6 @@ type UI struct {
 	copiedObsTimer     int
 	copiedOverlayTimer int
 	copiedRemoteTimer  int
-
-	updateAvailable bool
-	updateVersion   string
-	updateURL       string
 }
 
 var globalUI *UI
@@ -455,7 +457,6 @@ func loadAppIcon(w, h int32) uintptr {
 }
 
 // editSubclassProc ist die eigene WndProc für die Edit-Felder.
-// Sie ruft die originale Proc auf und zeichnet danach ggf. den Platzhalter-Text.
 func editSubclassProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	ui := globalUI
 	if ui == nil {
@@ -463,61 +464,8 @@ func editSubclassProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr 
 		return r
 	}
 
-	var origProc uintptr
-	var placeholder string
-	if hwnd == ui.hwndEditRist {
-		origProc = ui.editRistOrigProc
-		placeholder = "Port (z.B. 7890)"
-	} else if hwnd == ui.hwndEditOut {
-		origProc = ui.editOutOrigProc
-		placeholder = "z.B. 192.168.1.50:10000"
-	} else {
-		r, _, _ := procDefWindowProcW.Call(hwnd, uintptr(msg), wParam, lParam)
-		return r
-	}
-
+	origProc := ui.editOutOrigProc
 	r, _, _ := procCallWindowProcW.Call(origProc, hwnd, uintptr(msg), wParam, lParam)
-
-	// Platzhalter-Logik: zeichnen wenn Feld leer ist
-	drawPlaceholderIfEmpty := func() {
-		length, _, _ := procGetWindowTextLengthW.Call(hwnd)
-		if length == 0 {
-			hdc, _, _ := procGetDC.Call(hwnd)
-			if hdc != 0 {
-				var rc RECT
-				procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
-				procSetBkMode.Call(hdc, TRANSPARENT)
-				procSetTextColor.Call(hdc, uintptr(rgb(55, 75, 105)))
-				oldFont, _, _ := procSelectObject.Call(hdc, ui.fontSmall)
-				rc.Left += 4
-				rc.Top += 2
-				rc.Right -= 4
-				rc.Bottom -= 2
-				drawText(hdc, placeholder, rc.Left, rc.Top, rc.Right, rc.Bottom, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
-				procSelectObject.Call(hdc, oldFont)
-				procReleaseDC.Call(hwnd, hdc)
-			}
-		}
-	}
-
-	switch msg {
-	case WM_PAINT:
-		// Nach dem originalen WM_PAINT Platzhalter drüberzeichnen
-		drawPlaceholderIfEmpty()
-
-	case WM_SETFOCUS:
-		// Wenn Feld leer ist: Cursor verbergen und Platzhalter anzeigen
-		length, _, _ := procGetWindowTextLengthW.Call(hwnd)
-		if length == 0 {
-			procHideCaret.Call(hwnd)
-			procInvalidateRect.Call(hwnd, 0, 1)
-		}
-
-	case WM_KILLFOCUS:
-		// Beim Fokus-Verlust neu zeichnen damit Platzhalter korrekt erscheint
-		procInvalidateRect.Call(hwnd, 0, 1)
-	}
-
 	return r
 }
 
@@ -612,7 +560,7 @@ func RunWithPortAndIP(eng *engine.Engine, tel *telemetry.Parser, apiPort int, la
 	ui.fontIcon = createFont("Segoe UI", 14, 600)
 
 	className, _ := syscall.UTF16PtrFromString("RISTCyberSrvClass")
-	windowTitle, _ := syscall.UTF16PtrFromString(fmt.Sprintf("RIST RECEIVER // SERVER v%s", version.Version))
+	windowTitle, _ := syscall.UTF16PtrFromString("RIST RECEIVER // SERVER")
 
 	taskbarMsgStr, _ := syscall.UTF16PtrFromString("TaskbarCreated")
 	tbMsg, _, _ := procRegisterWindowMessageW.Call(uintptr(unsafe.Pointer(taskbarMsgStr)))
@@ -635,7 +583,7 @@ func RunWithPortAndIP(eng *engine.Engine, tel *telemetry.Parser, apiPort int, la
 		HInstance:     0,
 		HIcon:         hIconBig,
 		HCursor:       hCursorArrow,
-		HbrBackground: ui.brushBg,
+		HbrBackground: 0,
 		LpszClassName: className,
 		HIconSm:       hIconSm,
 	}
@@ -650,7 +598,7 @@ func RunWithPortAndIP(eng *engine.Engine, tel *telemetry.Parser, apiPort int, la
 		WS_EX_APPWINDOW,
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(windowTitle)),
-		WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE,
+		WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_VISIBLE|WS_CLIPCHILDREN,
 		0x80000000, 0x80000000,
 		uintptr(windowWidth), uintptr(windowHeight),
 		0, 0, 0, 0,
@@ -707,12 +655,6 @@ func RunWithPortAndIP(eng *engine.Engine, tel *telemetry.Parser, apiPort int, la
 			ui.onToggleServer()
 		}()
 	}
-
-	// Nach kurzer Pause im Hintergrund prüfen, ob neue Releases auf GitHub verfügbar sind
-	go func() {
-		time.Sleep(1500 * time.Millisecond)
-		ui.checkForUpdates()
-	}()
 
 	// Message Loop
 	var msg MSG
@@ -825,21 +767,6 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_USER_TELEMETRY, WM_USER_LOG:
 		procInvalidateRect.Call(hwnd, 0, 0)
-		if ui.hwndBtnStart != 0 {
-			procInvalidateRect.Call(ui.hwndBtnStart, 0, 0)
-		}
-		if ui.hwndBtnCopy != 0 {
-			procInvalidateRect.Call(ui.hwndBtnCopy, 0, 0)
-		}
-		if ui.hwndBtnCopyObs != 0 {
-			procInvalidateRect.Call(ui.hwndBtnCopyObs, 0, 0)
-		}
-		if ui.hwndBtnCopyRemote != 0 {
-			procInvalidateRect.Call(ui.hwndBtnCopyRemote, 0, 0)
-		}
-		if ui.hwndBtnCopyOverlay != 0 {
-			procInvalidateRect.Call(ui.hwndBtnCopyOverlay, 0, 0)
-		}
 		return 0
 
 	case WM_USER_CONFIG_UPDATE:
@@ -944,7 +871,6 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_CTLCOLOREDIT:
 		hdc := wParam
 		procSetBkColor.Call(hdc, uintptr(colInputBg))
-		// Gleiche Cyan-Farbe wie aktiver Jitter-Button; beim laufenden Stream gedimmt
 		if ui.engine.IsRunning() {
 			procSetTextColor.Call(hdc, uintptr(colTextMuted))
 		} else {
@@ -954,6 +880,12 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 
 	case WM_CTLCOLORSTATIC:
 		hdc := wParam
+		hCtrl := lParam
+		if hCtrl == ui.hwndEditOut {
+			procSetBkColor.Call(hdc, uintptr(colCardBg))
+			procSetTextColor.Call(hdc, uintptr(colTextMuted))
+			return ui.brushCard
+		}
 		procSetBkMode.Call(hdc, TRANSPARENT)
 		procSetTextColor.Call(hdc, uintptr(colTextMuted))
 		return ui.brushCard
@@ -1009,27 +941,12 @@ func wndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 			ui.openKofiLink()
 			return 0
 		}
-		// Update Badge Klickbereich (x: 24 bis 180, y: 38 bis 58)
-		ui.mu.Lock()
-		hasUpd := ui.updateAvailable
-		ui.mu.Unlock()
-		if hasUpd && x >= 24 && x <= 180 && y >= 38 && y <= 58 {
-			ui.openUpdateLink()
-			return 0
-		}
 
 	case WM_SETCURSOR:
 		var pt POINT
 		procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
 		procScreenToClient.Call(hwnd, uintptr(unsafe.Pointer(&pt)))
 		if pt.X >= 90 && pt.X <= 370 && pt.Y >= 594 && pt.Y <= 624 {
-			procSetCursor.Call(ui.hCursorHand)
-			return 1
-		}
-		ui.mu.Lock()
-		hasUpdCursor := ui.updateAvailable
-		ui.mu.Unlock()
-		if hasUpdCursor && pt.X >= 24 && pt.X <= 180 && pt.Y >= 38 && pt.Y <= 58 {
 			procSetCursor.Call(ui.hCursorHand)
 			return 1
 		}
@@ -1072,20 +989,7 @@ func (ui *UI) onCreate(hwnd uintptr) {
 	editClass, _ := syscall.UTF16PtrFromString("EDIT")
 	btnClass, _ := syscall.UTF16PtrFromString("BUTTON")
 
-	// RIST Port (x=307, y=87, w=98, h=22) – kein WS_EX_CLIENTEDGE, border wird custom gemalt
-	txtRist, _ := syscall.UTF16PtrFromString(strconv.Itoa(ui.config.RistPort))
-	ui.hwndEditRist, _, _ = procCreateWindowExW.Call(
-		0,
-		uintptr(unsafe.Pointer(editClass)),
-		uintptr(unsafe.Pointer(txtRist)),
-		WS_CHILD|WS_VISIBLE|ES_CENTER|ES_NUMBER|WS_TABSTOP,
-		307, 87, 98, 22,
-		hwnd,
-		uintptr(ID_EDIT_RIST_PORT),
-		0, 0,
-	)
-
-	// Forward UDP Target IP:Port (x=241, y=115, w=164, h=22) – kein WS_EX_CLIENTEDGE
+	// Forward UDP Target IP:Port (x=241, y=116, w=164, h=20) – kein WS_EX_CLIENTEDGE
 	outHost := ui.config.OutHost
 	if outHost == "" {
 		outHost = "127.0.0.1"
@@ -1097,17 +1001,14 @@ func (ui *UI) onCreate(hwnd uintptr) {
 		uintptr(unsafe.Pointer(editClass)),
 		uintptr(unsafe.Pointer(txtOut)),
 		WS_CHILD|WS_VISIBLE|ES_CENTER|WS_TABSTOP,
-		241, 115, 164, 22,
+		241, 116, 164, 20,
 		hwnd,
 		uintptr(ID_EDIT_OUT_PORT),
 		0, 0,
 	)
 
-	// Beide Edit-Controls subclassen damit wir Platzhalter-Text zeichnen können
 	subclassCb := syscall.NewCallback(editSubclassProc)
 	const gwlpWndProc = ^uintptr(3) // == -4 als uintptr (GWLP_WNDPROC)
-	origRist, _, _ := procSetWindowLongPtrW.Call(ui.hwndEditRist, gwlpWndProc, subclassCb)
-	ui.editRistOrigProc = origRist
 	origOut, _, _ := procSetWindowLongPtrW.Call(ui.hwndEditOut, gwlpWndProc, subclassCb)
 	ui.editOutOrigProc = origOut
 
@@ -1257,16 +1158,13 @@ func (ui *UI) onCreate(hwnd uintptr) {
 		0, 0,
 	)
 
-	procSendMessageW.Call(ui.hwndEditRist, WM_SETFONT, ui.fontMedium, 1)
 	procSendMessageW.Call(ui.hwndEditOut, WM_SETFONT, ui.fontMedium, 1)
 	procSendMessageW.Call(ui.hwndChkAutoStr, WM_SETFONT, ui.fontRegular, 1)
 	procSendMessageW.Call(ui.hwndChkAutoWin, WM_SETFONT, ui.fontRegular, 1)
 	procSendMessageW.Call(ui.hwndChkAudio, WM_SETFONT, ui.fontRegular, 1)
 	procSendMessageW.Call(ui.hwndChkTray, WM_SETFONT, ui.fontRegular, 1)
 
-	// Platzhalter-Text für Edit-Felder (EM_SETCUEBANNER)
-	cueRist, _ := syscall.UTF16PtrFromString("Port (z.B. 7890)")
-	procSendMessageW.Call(ui.hwndEditRist, EM_SETCUEBANNER, 1, uintptr(unsafe.Pointer(cueRist)))
+	// Platzhalter-Text für Edit-Feld (EM_SETCUEBANNER)
 	cueOut, _ := syscall.UTF16PtrFromString("IP:Port (z.B. 192.168.1.50:10000)")
 	procSendMessageW.Call(ui.hwndEditOut, EM_SETCUEBANNER, 1, uintptr(unsafe.Pointer(cueOut)))
 
@@ -1337,11 +1235,6 @@ func (ui *UI) StartServer() error {
 	outPort := ui.config.OutPort
 	bufMs := ui.config.BufferMs
 
-	if ui.hwndEditRist != 0 {
-		if p, err := strconv.Atoi(getWindowText(ui.hwndEditRist)); err == nil && p > 0 {
-			ristPort = p
-		}
-	}
 	if ui.hwndEditOut != 0 {
 		if h, p, err := settings.ParseOutTarget(getWindowText(ui.hwndEditOut), outPort); err == nil {
 			outHost = h
@@ -1368,9 +1261,12 @@ func (ui *UI) StartServer() error {
 		StatsPeriod: 0.5,
 	}
 
-	if ui.hwndEditRist != 0 {
-		procEnableWindow.Call(ui.hwndEditRist, 0)
-		procEnableWindow.Call(ui.hwndEditOut, 0)
+	if ui.hwndEditOut != 0 {
+		procSendMessageW.Call(ui.hwndEditOut, EM_SETREADONLY, 1, 0)
+		procInvalidateRect.Call(ui.hwndEditOut, 0, 0)
+	}
+	if ui.hwnd != 0 {
+		procInvalidateRect.Call(ui.hwnd, 0, 0)
 	}
 	// Buffer-Pill-Buttons beim laufenden Server deaktivieren
 	for _, h := range []uintptr{ui.hwndBtnBuf500, ui.hwndBtnBuf1000, ui.hwndBtnBuf2000, ui.hwndBtnBuf3000} {
@@ -1379,13 +1275,23 @@ func (ui *UI) StartServer() error {
 		}
 	}
 
+	if ui.hwndBtnStart != 0 {
+		procInvalidateRect.Call(ui.hwndBtnStart, 0, 0)
+	}
+
 	ui.SetLog(fmt.Sprintf("Warte auf Stream auf Port %d... (Puffer: %dms)", ristPort, bufMs))
 
 	go func() {
 		if err := ui.engine.Start(cfg); err != nil {
-			if ui.hwndEditRist != 0 {
-				procEnableWindow.Call(ui.hwndEditRist, 1)
-				procEnableWindow.Call(ui.hwndEditOut, 1)
+			if ui.hwndEditOut != 0 {
+				procSendMessageW.Call(ui.hwndEditOut, EM_SETREADONLY, 0, 0)
+				procInvalidateRect.Call(ui.hwndEditOut, 0, 0)
+			}
+			if ui.hwnd != 0 {
+				procInvalidateRect.Call(ui.hwnd, 0, 0)
+			}
+			if ui.hwndBtnStart != 0 {
+				procInvalidateRect.Call(ui.hwndBtnStart, 0, 0)
 			}
 			for _, h := range []uintptr{ui.hwndBtnBuf500, ui.hwndBtnBuf1000, ui.hwndBtnBuf2000, ui.hwndBtnBuf3000} {
 				if h != 0 {
@@ -1394,6 +1300,13 @@ func (ui *UI) StartServer() error {
 			}
 			ui.SetLog(fmt.Sprintf("Fehler: %v", err))
 			showError(ui.hwnd, "Startfehler", fmt.Sprintf("Konnte RIST Receiver nicht starten:\n%v", err))
+		} else {
+			if ui.hwndBtnStart != 0 {
+				procInvalidateRect.Call(ui.hwndBtnStart, 0, 0)
+			}
+			if ui.hwnd != 0 {
+				procInvalidateRect.Call(ui.hwnd, 0, 0)
+			}
 		}
 	}()
 
@@ -1403,9 +1316,9 @@ func (ui *UI) StartServer() error {
 func (ui *UI) StopServer() {
 	if ui.engine.IsRunning() {
 		ui.engine.Stop()
-		if ui.hwndEditRist != 0 {
-			procEnableWindow.Call(ui.hwndEditRist, 1)
-			procEnableWindow.Call(ui.hwndEditOut, 1)
+		if ui.hwndEditOut != 0 {
+			procSendMessageW.Call(ui.hwndEditOut, EM_SETREADONLY, 0, 0)
+			procInvalidateRect.Call(ui.hwndEditOut, 0, 0)
 		}
 		// Buffer-Pill-Buttons wieder aktivieren
 		for _, h := range []uintptr{ui.hwndBtnBuf500, ui.hwndBtnBuf1000, ui.hwndBtnBuf2000, ui.hwndBtnBuf3000} {
@@ -1438,16 +1351,13 @@ func (ui *UI) onToggleServer() {
 		return
 	}
 
-	ristPortStr := getWindowText(ui.hwndEditRist)
 	outTargetStr := getWindowText(ui.hwndEditOut)
-
-	ristPort, err1 := strconv.Atoi(ristPortStr)
+	ristPort := ui.config.RistPort
+	if ristPort <= 0 {
+		ristPort = 1968
+	}
 	outHost, outPort, err2 := settings.ParseOutTarget(outTargetStr, ui.config.OutPort)
 
-	if err1 != nil || ristPort <= 0 || ristPort > 65535 {
-		showError(ui.hwnd, "Ungültiger Port", "Bitte gib einen gültigen RIST Port zwischen 1 und 65535 ein.")
-		return
-	}
 	if err2 != nil || outPort <= 0 || outPort > 65535 {
 		showError(ui.hwnd, "Ungültiges Weiterleitungsziel", fmt.Sprintf("Bitte gib ein gültiges Ziel ein (z. B. '10000' oder '192.168.1.50:10000'):\n%v", err2))
 		return
@@ -1576,64 +1486,6 @@ func (ui *UI) openKofiLink() {
 	procShellExecuteW.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(kofiURL)), 0, 0, 1)
 }
 
-func (ui *UI) openUpdateLink() {
-	ui.mu.Lock()
-	url := ui.updateURL
-	ui.mu.Unlock()
-	if url == "" {
-		url = "https://github.com/grandstyle/rist-server/releases"
-	}
-	urlPtr, _ := syscall.UTF16PtrFromString(url)
-	op, _ := syscall.UTF16PtrFromString("open")
-	procShellExecuteW.Call(0, uintptr(unsafe.Pointer(op)), uintptr(unsafe.Pointer(urlPtr)), 0, 0, 1)
-}
-
-// checkForUpdates fragt im Hintergrund die GitHub API nach Releases ab
-func (ui *UI) checkForUpdates() {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest("GET", "https://api.github.com/repos/grandstyle/rist-server/releases/latest", nil)
-	if err != nil {
-		return
-	}
-	req.Header.Set("User-Agent", "RIST-Server/"+version.Version)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return
-	}
-
-	var rel struct {
-		TagName string `json:"tag_name"`
-		HTMLURL string `json:"html_url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return
-	}
-
-	remoteVer := strings.TrimPrefix(rel.TagName, "v")
-	currentVer := strings.TrimPrefix(version.Version, "v")
-
-	if remoteVer != "" && remoteVer != currentVer {
-		// Neuere Version vorhanden
-		ui.mu.Lock()
-		ui.updateAvailable = true
-		ui.updateVersion = rel.TagName
-		ui.updateURL = rel.HTMLURL
-		ui.statusMsg = fmt.Sprintf("★ Neues Update verfügbar (%s)! Klicke oben zum Herunterladen.", rel.TagName)
-		ui.mu.Unlock()
-
-		if ui.hwnd != 0 {
-			procPostMessageW.Call(ui.hwnd, WM_USER_LOG, 0, 0)
-			procInvalidateRect.Call(ui.hwnd, 0, 0)
-		}
-	}
-}
-
 func (ui *UI) onPaint(hdc uintptr) {
 	var rc RECT
 	procGetClientRect.Call(ui.hwnd, uintptr(unsafe.Pointer(&rc)))
@@ -1651,22 +1503,10 @@ func (ui *UI) onPaint(hdc uintptr) {
 	// 2. Header Bereich: Neon Cyberpunk Title
 	procSetBkMode.Call(memDC, TRANSPARENT)
 
-	// Cyber Tag & Version
+	// Cyber Tag
 	procSetTextColor.Call(memDC, uintptr(colCyanAccent))
 	oldFont, _, _ := procSelectObject.Call(memDC, ui.fontBrand)
-	drawText(memDC, "// RIST RECEIVER", 24, 16, 235, 46, DT_LEFT|DT_SINGLELINE)
-
-	// Falls Update verfügbar -> blinkender/auffälliger Update-Badge
-	ui.mu.Lock()
-	hasUpdate := ui.updateAvailable
-	updVer := ui.updateVersion
-	ui.mu.Unlock()
-
-	if hasUpdate {
-		procSetTextColor.Call(memDC, uintptr(colYellowAccent))
-		procSelectObject.Call(memDC, ui.fontSmall)
-		drawText(memDC, fmt.Sprintf("▲ UPDATE %s", updVer), 24, 42, 235, 56, DT_LEFT|DT_SINGLELINE)
-	}
+	drawText(memDC, "// RIST RECEIVER", 24, 16, 280, 46, DT_LEFT|DT_SINGLELINE)
 
 	// 3. Status Pill oben rechts (Exakt zentrierter Punkt & Text)
 	ui.drawCyberStatusBadge(memDC, 246, 14, 174, 34)
@@ -1675,29 +1515,46 @@ func (ui *UI) onPaint(hdc uintptr) {
 	ui.drawCyberCard(memDC, 24, 58, 396, 186, "STREAM PORTS & OPTIONEN")
 	procSetTextColor.Call(memDC, uintptr(colTextWhite))
 	procSelectObject.Call(memDC, ui.fontRegular)
-	drawText(memDC, "RIST Empfangsport (Sender):", 40, 90, 295, 110, DT_LEFT|DT_SINGLELINE)
-	drawText(memDC, "Weiterleitung (Ziel-IP:Port):", 40, 118, 235, 138, DT_LEFT|DT_SINGLELINE)
-	drawText(memDC, "RIST Puffer (Jitter/Latenz ms):", 40, 146, 295, 166, DT_LEFT|DT_SINGLELINE)
+	drawText(memDC, "RIST Empfang (Sender-Ziel):", 40, 85, 235, 111, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+	drawText(memDC, "Weiterleitung (Ziel-IP:Port):", 40, 113, 235, 139, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
+	drawText(memDC, "RIST Puffer (Jitter/Latenz ms):", 40, 142, 235, 166, DT_LEFT|DT_VCENTER|DT_SINGLELINE)
 
 	// Custom Rahmen für die Edit-Felder (1px außen um das Feld)
 	// Die Felder sind ohne WS_EX_CLIENTEDGE, daher malen wir den Border im Parent-DC.
 	editRunning := ui.engine.IsRunning()
 	editBorderCol := colCyanAccent
+	boxBgBrush := ui.brushInput
 	if editRunning {
 		editBorderCol = colCardBorder
+		boxBgBrush = ui.brushCard
 	}
 	editPen := createPen(0, 1, editBorderCol)
-	editBgBrush := createSolidBrush(colInputBg)
-	oldEditBrush, _, _ := procSelectObject.Call(memDC, editBgBrush)
+	oldEditBrush, _, _ := procSelectObject.Call(memDC, boxBgBrush)
 	oldEditPen, _, _ := procSelectObject.Call(memDC, editPen)
-	// RIST Port Rahmen: 1px außen um x=307,y=87,w=98,h=22
-	procRoundRect.Call(memDC, 305, 85, 407, 111, 4, 4)
-	// Ziel IP:Port Rahmen: 1px außen um x=241,y=115,w=164,h=22
+	// RIST Empfang IP:Port Rahmen: 1px außen um x=241,y=87,w=164,h=22 -> rect 239, 85, 407, 111
+	procRoundRect.Call(memDC, 239, 85, 407, 111, 4, 4)
+	// Ziel IP:Port Rahmen: 1px außen um x=241,y=115,w=164,h=22 -> rect 239, 113, 407, 139
 	procRoundRect.Call(memDC, 239, 113, 407, 139, 4, 4)
 	procSelectObject.Call(memDC, oldEditBrush)
 	procSelectObject.Call(memDC, oldEditPen)
 	procDeleteObject.Call(editPen)
-	procDeleteObject.Call(editBgBrush)
+	// RIST Empfang IP:Port Text (statisch, nicht editierbar)
+	// Inaktiv: Leuchtendes Cyan (colCyanAccent), Aktiv: Gedimmtes Grau (colTextMuted)
+	ristPort := ui.config.RistPort
+	if ristPort <= 0 {
+		ristPort = 1968
+	}
+	ristText := fmt.Sprintf("%s:%d", ui.lanIP, ristPort)
+	ristColor := colCyanAccent
+	if editRunning {
+		ristColor = colTextMuted
+	}
+	procSetBkMode.Call(memDC, TRANSPARENT)
+	procSetTextColor.Call(memDC, uintptr(ristColor))
+	oldF, _, _ := procSelectObject.Call(memDC, ui.fontMedium)
+	drawText(memDC, ristText, 239, 85, 407, 111, DT_CENTER|DT_VCENTER|DT_SINGLELINE)
+	procSelectObject.Call(memDC, oldF)
+
 
 	// 5. Live Telemetrie Card (y=254, h=252)
 	ui.drawCyberCard(memDC, 24, 254, 396, 252, "LIVE DURCHSATZ & TELEMETRIE")
@@ -2271,6 +2128,11 @@ func getWindowText(hwnd uintptr) string {
 	buf := make([]uint16, length+1)
 	procGetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(&buf[0])), uintptr(length+1))
 	return syscall.UTF16ToString(buf)
+}
+
+func setWindowText(hwnd uintptr, text string) {
+	ptr, _ := syscall.UTF16PtrFromString(text)
+	procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(ptr)))
 }
 
 func showError(hwnd uintptr, title, msg string) {

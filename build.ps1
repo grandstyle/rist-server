@@ -6,6 +6,13 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Building RIST Receiver & Setup (Go)   " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
+# 0. Ensure assets\ffmpeg.exe is present (auto-download if building from clean git clone)
+if (-not (Test-Path "assets\ffmpeg.exe")) {
+    Write-Host "[0/4] Downloading embedded FFmpeg engine (librist) from GitHub Releases..." -ForegroundColor Yellow
+    $ffmpegUrl = "https://github.com/grandstyle/rist-server/releases/download/v1.0.1/ffmpeg.exe"
+    Invoke-WebRequest -Uri $ffmpegUrl -OutFile "assets\ffmpeg.exe" -UseBasicParsing
+}
+
 # 1. Main App Resource compilation (.syso with Icon & Manifest)
 if (Test-Path "winres\winres.json") {
     Write-Host "[1/4] Generating RIST-Server Resources & Icon..." -ForegroundColor Yellow

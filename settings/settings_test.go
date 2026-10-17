@@ -48,3 +48,43 @@ func TestParseOutTarget(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRistPort(t *testing.T) {
+	tests := []struct {
+		input       string
+		defaultPort int
+		wantPort    int
+		wantErr     bool
+	}{
+		{"", 1968, 1968, false},
+		{"   ", 1968, 1968, false},
+		{"1968", 1968, 1968, false},
+		{"2000", 1968, 2000, false},
+		{"192.168.1.50:1968", 1968, 1968, false},
+		{"192.168.1.50:7890", 1968, 7890, false},
+		{":1968", 1968, 1968, false},
+		{":7890", 1968, 7890, false},
+		{"0.0.0.0:1968", 1968, 1968, false},
+		{"70000", 1968, 0, true},
+		{"-1", 1968, 0, true},
+		{"192.168.1.50:99999", 1968, 0, true},
+		{"invalid", 1968, 1968, false}, // falls nur text/ip ohne port -> defaultPort
+	}
+
+	for _, tc := range tests {
+		gotPort, err := ParseRistPort(tc.input, tc.defaultPort)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("ParseRistPort(%q) expected error, got nil", tc.input)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("ParseRistPort(%q) unexpected error: %v", tc.input, err)
+			}
+			if gotPort != tc.wantPort {
+				t.Errorf("ParseRistPort(%q) gotPort = %d, want %d", tc.input, gotPort, tc.wantPort)
+			}
+		}
+	}
+}
+

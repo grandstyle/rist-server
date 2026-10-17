@@ -331,7 +331,7 @@ func main() {
 	windowWidth := int32(470)
 	windowHeight := int32(430) // Standardgröße ohne Deinstallations-Button
 	if alreadyInstalled {
-		windowHeight = 460 // Platz für den zusätzlichen Deinstallations-Button
+		windowHeight = 480 // Ausreichend Platz für Deinstallations-Button, Statuszeile, Ko-fi und unteren Abstand
 	}
 
 	hwnd, _, _ := procCreateWindowExW.Call(
@@ -410,8 +410,12 @@ func setupWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 	case WM_LBUTTONDOWN:
 		x := int32(lParam & 0xFFFF)
 		y := int32((lParam >> 16) & 0xFFFF)
-		// Ko-fi Support Link Klickbereich
-		if x >= 80 && x <= 390 && y >= 366 && y <= 392 {
+		// Ko-fi Support Link Klickbereich (dynamisch je nach Button-Anzahl)
+		kofiTop := int32(366)
+		if ui.alreadyInstalled {
+			kofiTop = 412
+		}
+		if x >= 80 && x <= 390 && y >= kofiTop && y <= kofiTop+26 {
 			ui.openKofiLink()
 			return 0
 		}
@@ -420,7 +424,11 @@ func setupWndProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		var pt struct{ X, Y int32 }
 		user32.NewProc("GetCursorPos").Call(uintptr(unsafe.Pointer(&pt)))
 		user32.NewProc("ScreenToClient").Call(hwnd, uintptr(unsafe.Pointer(&pt)))
-		if pt.X >= 80 && pt.X <= 390 && pt.Y >= 366 && pt.Y <= 392 {
+		kofiTopCur := int32(366)
+		if ui.alreadyInstalled {
+			kofiTopCur = 412
+		}
+		if pt.X >= 80 && pt.X <= 390 && pt.Y >= kofiTopCur && pt.Y <= kofiTopCur+26 {
 			procSetCursor.Call(ui.hCursorHand)
 			return 1
 		}
@@ -629,7 +637,7 @@ func (ui *SetupUI) onPaint(hdc uintptr) {
 
 	procSetTextColor.Call(memDC, uintptr(colTextMuted))
 	procSelectObject.Call(memDC, ui.fontRegular)
-	drawText(memDC, "Single-File RIST & SRT Relay Server für Windows", 24, 44, 440, 62, DT_LEFT|DT_SINGLELINE)
+	drawText(memDC, "Single-File RIST Relay Server für Windows", 24, 44, 440, 62, DT_LEFT|DT_SINGLELINE)
 
 	// Card: Zielverzeichnis & Optionen
 	ui.drawCard(memDC, 24, 74, 422, 196, "INSTALLATIONS-OPTIONEN")
@@ -643,11 +651,11 @@ func (ui *SetupUI) onPaint(hdc uintptr) {
 	// Deinstallations-Button bei y=344+34=378 (nur wenn alreadyInstalled)
 	var statusY, kofiY int32
 	if ui.alreadyInstalled {
-		statusY = 386 // unter dem Deinstallations-Button
-		kofiY = 406
+		statusY = 388 // unter dem Deinstallations-Button
+		kofiY = 412   // schön mit Abstand vor dem unteren Rand (Fensterhöhe 480)
 	} else {
 		statusY = 346 // direkt unter dem Install-Button
-		kofiY = 366
+		kofiY = 370
 	}
 
 	procSetTextColor.Call(memDC, uintptr(colYellowAccent))
@@ -971,7 +979,7 @@ func registerUninstall(targetDir, uninstallerPath, exePath string) {
 			`New-Item -Path $k -Force | Out-Null; `+
 			`Set-ItemProperty -Path $k -Name 'DisplayName' -Value 'RIST Receiver Server'; `+
 			`Set-ItemProperty -Path $k -Name 'DisplayIcon' -Value '%s'; `+
-			`Set-ItemProperty -Path $k -Name 'DisplayVersion' -Value '1.0.0'; `+
+			`Set-ItemProperty -Path $k -Name 'DisplayVersion' -Value '1.0.1'; `+
 			`Set-ItemProperty -Path $k -Name 'Publisher' -Value 'Jumpgeil'; `+
 			`Set-ItemProperty -Path $k -Name 'InstallLocation' -Value '%s'; `+
 			`Set-ItemProperty -Path $k -Name 'UninstallString' -Value '\"%s\" --uninstall'`,

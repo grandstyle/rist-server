@@ -4,7 +4,7 @@
       "0409": {
         "identity": {
           "name": "RIST.Receiver.Server",
-          "version": "1.0.0.0",
+          "version": "1.0.1.0",
           "type": "win32",
           "processorArchitecture": "*"
         },
@@ -29,20 +29,20 @@
     "#1": {
       "0409": {
         "fixed": {
-          "file_version": "1.0.0.0",
-          "product_version": "1.0.0.0"
+          "file_version": "1.0.1.0",
+          "product_version": "1.0.1.0"
         },
         "info": {
           "0409": {
             "Comments": "Ultra-Lean RIST Receiver Server",
             "CompanyName": "RIST Server",
             "FileDescription": "RIST Receiver Server",
-            "FileVersion": "1.0.0.0",
+            "FileVersion": "1.0.1.0",
             "InternalName": "RIST-Server.exe",
             "LegalCopyright": "Copyright 2026",
             "OriginalFilename": "RIST-Server.exe",
             "ProductName": "RIST Receiver Server",
-            "ProductVersion": "1.0.0.0"
+            "ProductVersion": "1.0.1.0"
           }
         }
       }
